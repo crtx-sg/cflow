@@ -1,17 +1,17 @@
-# Proposal Lifecycle
+# Proposal Lifecycle (Database-First)
 
 ## ADDED Requirements
 
 ### Requirement: Proposal CRUD Operations
 
-The system SHALL provide endpoints to create, read, update, and delete change proposals.
+The system SHALL provide endpoints to create, read, update, and delete change proposals with content stored in database.
 
 #### Scenario: Create proposal
 
 - **WHEN** an Author calls `POST /api/v1/projects/{project_id}/proposals` with name
 - **THEN** the system creates proposal record with status DRAFT
-- **AND** runs `openspec scaffold {name}` in project directory
-- **AND** sets draft_path to the created directory
+- **AND** sets author_id to current user
+- **AND** creates initial ProposalContent entries for standard files (proposal.md, tasks.md)
 - **AND** logs creation to audit trail
 
 #### Scenario: Create proposal duplicate name
@@ -29,14 +29,13 @@ The system SHALL provide endpoints to create, read, update, and delete change pr
 #### Scenario: Get proposal details
 
 - **WHEN** a user calls `GET /api/v1/proposals/{id}`
-- **THEN** the system returns proposal details including status, created_by, approved_by
+- **THEN** the system returns proposal details including status, author_id, filesystem_path
 
 #### Scenario: Delete proposal
 
-- **WHEN** an Author or Admin calls `DELETE /api/v1/proposals/{id}`
+- **WHEN** the Author or Admin calls `DELETE /api/v1/proposals/{id}`
 - **AND** proposal status is DRAFT
-- **THEN** the system deletes proposal record
-- **AND** optionally deletes draft files (based on query param)
+- **THEN** the system deletes proposal record and all ProposalContent
 - **AND** logs deletion to audit trail
 
 #### Scenario: Delete non-draft proposal
@@ -50,38 +49,50 @@ The system SHALL enforce status transitions: DRAFT → REVIEW → READY → MERG
 
 #### Scenario: Submit for review
 
-- **WHEN** an Author calls `POST /api/v1/proposals/{id}/submit`
+- **WHEN** the Author calls `POST /api/v1/proposals/{id}/submit`
 - **AND** proposal is in DRAFT status
-- **AND** validation passes
+- **AND** proposal has required content (proposal.md at minimum)
 - **THEN** the system transitions status to REVIEW
 - **AND** logs transition to audit trail
 
-#### Scenario: Submit without validation
+#### Scenario: Return to draft from review
 
-- **WHEN** an Author submits proposal that fails validation
+- **WHEN** the Author calls `POST /api/v1/proposals/{id}/return-to-draft`
+- **AND** proposal is in REVIEW status
+- **THEN** the system transitions status to DRAFT
+- **AND** logs transition to audit trail
+
+#### Scenario: Mark ready with unresolved comments
+
+- **WHEN** the Author calls `POST /api/v1/proposals/{id}/mark-ready`
+- **AND** proposal has OPEN comments
 - **THEN** the system returns 400 Bad Request
-- **AND** includes validation errors
+- **AND** includes list of unresolved comment IDs
 
-#### Scenario: Approve proposal
+#### Scenario: Mark ready success
 
-- **WHEN** a Reviewer calls `POST /api/v1/proposals/{id}/approve`
+- **WHEN** the Author calls `POST /api/v1/proposals/{id}/mark-ready`
 - **AND** proposal is in REVIEW status
-- **THEN** the system transitions status to READY
-- **AND** sets approved_by to current user
-- **AND** logs approval to audit trail
+- **AND** all comments are resolved (ACCEPTED, REJECTED, or DEFERRED)
+- **THEN** the system writes all ProposalContent to filesystem
+- **AND** runs `openspec validate` on written files
+- **AND** if validation passes, transitions status to READY
+- **AND** sets filesystem_path to the written directory
+- **AND** logs transition to audit trail
 
-#### Scenario: Request changes
+#### Scenario: Mark ready validation failure
 
-- **WHEN** a Reviewer calls `POST /api/v1/proposals/{id}/request-changes`
-- **AND** proposal is in REVIEW status
-- **THEN** the system transitions status back to DRAFT
-- **AND** logs the request to audit trail
+- **WHEN** the system attempts to mark proposal ready
+- **AND** `openspec validate` fails
+- **THEN** the system deletes written files
+- **AND** returns 400 Bad Request with validation errors
+- **AND** proposal remains in REVIEW status
 
 #### Scenario: Merge proposal
 
 - **WHEN** an Admin calls `POST /api/v1/proposals/{id}/merge`
 - **AND** proposal is in READY status
-- **THEN** the system runs OpenSpec merge/implement command
+- **THEN** the system runs OpenSpec archive command
 - **AND** transitions status to MERGED
 - **AND** logs merge to audit trail
 
@@ -91,77 +102,150 @@ The system SHALL enforce status transitions: DRAFT → REVIEW → READY → MERG
 - **THEN** the system returns 400 Bad Request
 - **AND** indicates valid transitions from current status
 
-### Requirement: Proposal File Operations
+### Requirement: Database Content Storage
 
-The system SHALL provide endpoints to read and write proposal files.
+The system SHALL store proposal content in database during DRAFT and REVIEW states.
 
-#### Scenario: List proposal files
+#### Scenario: Read content
 
-- **WHEN** a user calls `GET /api/v1/proposals/{id}/files`
-- **THEN** the system returns list of files in draft_path
-- **AND** includes file metadata (name, size, modified time)
+- **WHEN** a user calls `GET /api/v1/proposals/{id}/content/{file_path}`
+- **THEN** the system returns content from ProposalContent table
+- **AND** includes version number and last updated info
 
-#### Scenario: Read proposal file
+#### Scenario: Write content in draft
 
-- **WHEN** a user calls `GET /api/v1/proposals/{id}/files/{path}`
-- **THEN** the system returns file content
-- **AND** validates path is within proposal directory
-
-#### Scenario: Write proposal file
-
-- **WHEN** an Author calls `PUT /api/v1/proposals/{id}/files/{path}`
+- **WHEN** the Author calls `PUT /api/v1/proposals/{id}/content/{file_path}`
 - **AND** proposal is in DRAFT status
-- **THEN** the system creates backup of existing file
-- **AND** writes new content
+- **THEN** the system saves content to ProposalContent table
+- **AND** creates ContentVersion entry for history
+- **AND** increments version number
 - **AND** logs modification to audit trail
 
-#### Scenario: Write to non-draft proposal
+#### Scenario: Write content in review
 
-- **WHEN** a user attempts to write to proposal not in DRAFT status
+- **WHEN** the Author calls `PUT /api/v1/proposals/{id}/content/{file_path}`
+- **AND** proposal is in REVIEW status
+- **THEN** the system saves content to ProposalContent table
+- **AND** creates ContentVersion entry for history
+- **AND** logs modification to audit trail
+
+#### Scenario: Write content non-author
+
+- **WHEN** a non-Author user attempts to write content
+- **THEN** the system returns 403 Forbidden
+
+#### Scenario: Write content in ready or merged
+
+- **WHEN** any user attempts to write content to proposal in READY or MERGED status
 - **THEN** the system returns 400 Bad Request
+
+#### Scenario: List content files
+
+- **WHEN** a user calls `GET /api/v1/proposals/{id}/content`
+- **THEN** the system returns list of file paths with metadata
+- **AND** includes version, size, updated_at for each file
+
+### Requirement: Content Version History
+
+The system SHALL maintain version history for all proposal content.
+
+#### Scenario: Get version history
+
+- **WHEN** a user calls `GET /api/v1/proposals/{id}/content/{file_path}/versions`
+- **THEN** the system returns list of all versions
+- **AND** includes version number, created_by, created_at, change_reason
+
+#### Scenario: Get specific version
+
+- **WHEN** a user calls `GET /api/v1/proposals/{id}/content/{file_path}/versions/{version}`
+- **THEN** the system returns content for that specific version
+
+#### Scenario: Rollback to version
+
+- **WHEN** the Author calls `POST /api/v1/proposals/{id}/content/{file_path}/rollback`
+- **WITH** version number
+- **AND** proposal is in DRAFT or REVIEW status
+- **THEN** the system restores content from specified version
+- **AND** creates new version entry with reason "Rollback to version X"
+- **AND** logs rollback to audit trail
+
+### Requirement: Validate Draft
+
+The system SHALL support validation of database content without writing to permanent filesystem.
+
+#### Scenario: Validate draft success
+
+- **WHEN** a user calls `POST /api/v1/proposals/{id}/validate-draft`
+- **THEN** the system creates temporary directory
+- **AND** writes all ProposalContent to temp directory structure
+- **AND** executes `openspec validate` on temp directory
+- **AND** parses and returns validation results
+- **AND** deletes temporary directory
+- **AND** stores validation result in database
+
+#### Scenario: Validate draft failure
+
+- **WHEN** validation finds errors
+- **THEN** the system returns validation errors with file references
+- **AND** categorizes issues (error, warning, info)
+- **AND** proposal status is not changed
+
+#### Scenario: Validate draft streaming
+
+- **WHEN** a user connects to `/ws/proposals/{id}/validate-draft`
+- **THEN** the system streams validation output in real-time
+- **AND** sends final result when complete
 
 ### Requirement: Proposal Iteration
 
 The system SHALL support LLM-assisted iteration on proposal content.
 
-#### Scenario: Iterate with comments
+#### Scenario: Iterate with accepted comments
 
-- **WHEN** an Author calls `POST /api/v1/proposals/{id}/iterate`
-- **WITH** user_instruction and selected comment IDs
-- **THEN** the system reads current proposal files
-- **AND** fetches selected review comments
+- **WHEN** the Author calls `POST /api/v1/proposals/{id}/iterate`
+- **WITH** user_instruction and target file paths
+- **THEN** the system reads current content from ProposalContent
+- **AND** fetches comments with status ACCEPTED and selected_for_iteration=true
 - **AND** constructs meta-prompt with context
 - **AND** calls LLM provider
-- **AND** backs up existing files
-- **AND** writes LLM output to proposal files
-- **AND** automatically runs validation
+- **AND** saves generated content to ProposalContent (creates version)
+- **AND** clears selected_for_iteration flag on processed comments
+- **AND** automatically runs validate-draft
 - **AND** returns iteration result with validation status
 
-#### Scenario: Iterate on locked project
+#### Scenario: Iterate non-author
 
-- **WHEN** a user attempts iteration on locked project (locked by another user)
-- **THEN** the system returns 409 Conflict
+- **WHEN** a non-Author user attempts iteration
+- **THEN** the system returns 403 Forbidden
 
 #### Scenario: Iterate LLM failure
 
 - **WHEN** LLM call fails during iteration
 - **THEN** the system returns 502 Bad Gateway
-- **AND** does not modify any files
+- **AND** does not modify any content
 - **AND** logs the failure
 
-### Requirement: File Backup Before Modification
+### Requirement: Filesystem Write on Ready
 
-The system SHALL create backups before overwriting proposal files.
+The system SHALL write proposal content to filesystem only when transitioning to READY state.
 
-#### Scenario: Backup created on iteration
+#### Scenario: Write to filesystem
 
-- **WHEN** the system modifies a proposal file
-- **THEN** a timestamped backup is created in `.backups/` subdirectory
-- **AND** backup includes original filename and timestamp
+- **WHEN** proposal transitions to READY
+- **THEN** the system creates directory `{project.local_path}/openspec/changes/{proposal.name}/`
+- **AND** writes all ProposalContent files to appropriate paths
+- **AND** validates path is within project root
+- **AND** sets proposal.filesystem_path to the directory
 
-#### Scenario: Restore from backup
+#### Scenario: Filesystem write path validation
 
-- **WHEN** an Author calls `POST /api/v1/proposals/{id}/files/{path}/restore`
-- **WITH** backup_id
-- **THEN** the system restores file from specified backup
-- **AND** creates backup of current version before restore
+- **WHEN** writing to filesystem
+- **THEN** all paths are validated against project root
+- **AND** path traversal attempts are rejected
+
+#### Scenario: Cleanup on validation failure
+
+- **WHEN** filesystem write succeeds but validation fails
+- **THEN** the system deletes all written files
+- **AND** returns proposal to REVIEW status
+- **AND** filesystem_path remains NULL

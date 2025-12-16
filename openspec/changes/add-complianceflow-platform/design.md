@@ -10,7 +10,7 @@ ComplianceFlow wraps the OpenSpec CLI with a web-based GUI for safety-critical s
 - Must work with existing OpenSpec CLI (no modifications)
 - Must support air-gapped deployments (local LLM option)
 - Audit trail requirements for regulatory compliance
-- Multi-user concurrent access
+- Single Author editing model (no concurrent edits)
 
 ## Goals / Non-Goals
 
@@ -25,7 +25,7 @@ ComplianceFlow wraps the OpenSpec CLI with a web-based GUI for safety-critical s
 ### Non-Goals
 - Replacing OpenSpec CLI functionality
 - Building a general-purpose document editor
-- Real-time collaborative editing (v1)
+- Real-time collaborative editing (single Author model)
 - Mobile-first design (v1)
 
 ## Decisions
@@ -86,6 +86,7 @@ def validate_path(path: Path, project: Project) -> Path:
 **Rationale**:
 - Defense in depth: validation + sandboxing
 - Audit-friendly with explicit allowlist
+- Only applies when writing to filesystem (READY state)
 
 ### D4: Real-time Updates - WebSocket + Server-Sent Events
 
@@ -106,34 +107,55 @@ async def validation_stream(websocket: WebSocket, project_id: int):
         await websocket.send_json({"type": "output", "data": line})
 ```
 
-### D5: Concurrent Access - Optimistic Locking + Project Locks
+### D5: Database-First Content Management
 
-**Decision**:
-- Database-level optimistic locking (version field)
-- Advisory project locks for CLI operations
-
-```python
-class Project(SQLModel):
-    id: int
-    version: int  # Incremented on each update
-    locked_by: int | None
-    locked_at: datetime | None
-```
+**Decision**: Store proposal content in database during DRAFT and REVIEW states; write to filesystem only on READY transition.
 
 **Rationale**:
-- Optimistic locking handles most concurrent edits
-- Explicit locks prevent conflicting CLI operations
+- **No file locking needed**: Single Author edit model eliminates concurrent access conflicts
+- **Atomic operations**: Database transactions easier than file operations
+- **Built-in versioning**: All changes tracked automatically in database
+- **Simpler conflict prevention**: Author is sole editor during DRAFT/REVIEW
+- **Cleaner filesystem**: Only finalized proposals exist on disk
+
+**Implementation**:
+```python
+class ProposalContent(SQLModel, table=True):
+    id: int = Field(primary_key=True)
+    proposal_id: int = Field(foreign_key="changeproposal.id")
+    file_path: str  # e.g., "proposal.md", "specs/auth/spec.md"
+    content: str  # Full file content
+    version: int
+    updated_by: int = Field(foreign_key="user.id")
+    updated_at: datetime
+
+class ContentVersion(SQLModel, table=True):
+    id: int = Field(primary_key=True)
+    proposal_id: int = Field(foreign_key="changeproposal.id")
+    file_path: str
+    content: str
+    version: int
+    created_by: int = Field(foreign_key="user.id")
+    created_at: datetime
+    change_reason: str | None
+```
+
+**Workflow**:
+1. DRAFT/REVIEW: All edits go to `ProposalContent` table
+2. Each edit creates entry in `ContentVersion` for history
+3. "Validate Draft": Write to temp dir → run CLI → cleanup
+4. "Mark Ready": Write all `ProposalContent` to filesystem → validate → confirm
 
 ### D6: Audit Trail - Append-Only Event Log
 
 **Decision**: Separate `AuditLog` table with immutable records
 
 ```python
-class AuditLog(SQLModel):
-    id: int
+class AuditLog(SQLModel, table=True):
+    id: int = Field(primary_key=True)
     timestamp: datetime
     user_id: int
-    action: str  # PROPOSAL_CREATED, STATUS_CHANGED, FILE_MODIFIED, etc.
+    action: str  # PROPOSAL_CREATED, STATUS_CHANGED, CONTENT_MODIFIED, etc.
     resource_type: str
     resource_id: int
     old_value: str | None  # JSON
@@ -212,6 +234,67 @@ class LLMConfig(BaseModel):
 - Ollama for ease of use, vLLM for performance
 - Same abstraction layer, no code changes needed
 
+### D12: Comment Resolution Workflow
+
+**Decision**: Comments follow status workflow: OPEN → ACCEPTED/REJECTED/DEFERRED
+
+**Implementation**:
+```python
+class CommentStatus(str, Enum):
+    OPEN = "open"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    DEFERRED = "deferred"
+
+class ReviewComment(SQLModel, table=True):
+    id: int = Field(primary_key=True)
+    proposal_id: int = Field(foreign_key="changeproposal.id")
+    user_id: int = Field(foreign_key="user.id")
+    target_file: str
+    line_number: int | None
+    comment_text: str
+    status: CommentStatus = CommentStatus.OPEN
+    author_response: str | None  # Reason for accept/reject/defer
+    selected_for_iteration: bool = False
+    created_at: datetime
+    resolved_at: datetime | None
+```
+
+**Rationale**:
+- Clear workflow for comment resolution
+- Author provides reasoning for each decision
+- Only ACCEPTED comments included in LLM iteration
+- Transition guard: all OPEN comments must be resolved before READY
+
+### D13: Validate Draft - Temporary Filesystem Write
+
+**Decision**: "Validate Draft" writes content to temp directory, runs OpenSpec CLI, then cleans up
+
+**Implementation**:
+```python
+async def validate_draft(proposal_id: int) -> ValidationResult:
+    proposal = get_proposal(proposal_id)
+    contents = get_proposal_contents(proposal_id)
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # Write all content files to temp structure
+        for content in contents:
+            file_path = Path(temp_dir) / content.file_path
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(content.content)
+
+        # Run OpenSpec validation
+        result = await openspec_client.validate_change(temp_dir, proposal.name)
+
+        # Temp dir auto-cleaned up
+        return result
+```
+
+**Rationale**:
+- Enables validation without committing to filesystem
+- Catches errors early in DRAFT/REVIEW states
+- No cleanup needed (temp dir auto-deleted)
+
 ## Architecture
 
 ```
@@ -239,13 +322,16 @@ class LLMConfig(BaseModel):
 │  ┌─────────────┐ ┌─────────────┐ ┌─────────────────────┐   │
 │  │ LLM Svc     │ │ OpenSpec Cl │ │ Audit Svc           │   │
 │  └─────────────┘ └─────────────┘ └─────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │              Content Versioning Svc                  │   │
+│  └─────────────────────────────────────────────────────┘   │
 └────────────────────────┬────────────────────────────────────┘
                          │
         ┌────────────────┼────────────────┐
         ▼                ▼                ▼
 ┌───────────────┐ ┌───────────────┐ ┌───────────────┐
 │   SQLite/PG   │ │  Filesystem   │ │  LLM APIs     │
-│   Database    │ │  (Projects)   │ │  Cloud/Local  │
+│   Database    │ │ (READY only)  │ │  Cloud/Local  │
 └───────────────┘ └───────────────┘ └───────────────┘
 ```
 
@@ -259,15 +345,27 @@ class LLMConfig(BaseModel):
 │ email        │  │  │ name             │  │  │ project_id (FK) │
 │ hashed_pass  │  │  │ local_path       │  │  │ name (slug)     │
 │ role         │  └──│ owner_id (FK)    │  └──│ status          │
-│ created_at   │     │ compliance_std   │     │ draft_path      │
-│ last_login   │     │ locked_by (FK)   │     │ created_by (FK) │
-└──────────────┘     │ locked_at        │     │ approved_by(FK) │
-                     │ version          │     │ created_at      │
-                     └──────────────────┘     │ updated_at      │
+│ created_at   │     │ compliance_std   │     │ author_id (FK)  │
+│ last_login   │     │ created_at       │     │ filesystem_path │
+└──────────────┘     └──────────────────┘     │ created_at      │
+                                              │ updated_at      │
                                               └─────────────────┘
                                                       │
-                     ┌────────────────────────────────┘
-                     ▼
+        ┌─────────────────────────────────────────────┤
+        ▼                                             ▼
+┌──────────────────────┐     ┌──────────────────────────────┐
+│   ProposalContent    │     │      ContentVersion          │
+├──────────────────────┤     ├──────────────────────────────┤
+│ id                   │     │ id                           │
+│ proposal_id (FK)     │     │ proposal_id (FK)             │
+│ file_path            │     │ file_path                    │
+│ content (TEXT)       │     │ content (TEXT)               │
+│ version              │     │ version                      │
+│ updated_by (FK)      │     │ created_by (FK)              │
+│ updated_at           │     │ created_at                   │
+└──────────────────────┘     │ change_reason                │
+                             └──────────────────────────────┘
+
 ┌──────────────────────┐     ┌──────────────────────┐
 │   ReviewComment      │     │     AuditLog         │
 ├──────────────────────┤     ├──────────────────────┤
@@ -277,10 +375,12 @@ class LLMConfig(BaseModel):
 │ target_file          │     │ action               │
 │ line_number          │     │ resource_type        │
 │ comment_text         │     │ resource_id          │
-│ status               │     │ old_value (JSON)     │
-│ selected_for_iter    │     │ new_value (JSON)     │
-│ created_at           │     │ ip_address           │
-└──────────────────────┘     └──────────────────────┘
+│ status (ENUM)        │     │ old_value (JSON)     │
+│ author_response      │     │ new_value (JSON)     │
+│ selected_for_iter    │     │ ip_address           │
+│ created_at           │     └──────────────────────┘
+│ resolved_at          │
+└──────────────────────┘
 ```
 
 ## Risks / Trade-offs
@@ -289,7 +389,8 @@ class LLMConfig(BaseModel):
 |------|--------|------------|
 | OpenSpec CLI version incompatibility | High | Pin version, integration tests, version detection |
 | LLM hallucination in compliance docs | High | Human review required, diff view, validation gate |
-| Filesystem corruption from concurrent CLI | Medium | Project locking, atomic writes, backup before modify |
+| Large content in database | Low | TEXT columns handle 50KB+ content, index on proposal_id |
+| Validation failure at READY | Medium | "Validate Draft" catches errors early |
 | WebSocket connection drops | Medium | Auto-reconnect, SSE fallback, operation idempotency |
 | SQLite scaling limits | Low | Postgres migration path, connection pooling |
 | Local LLM quality variance | Medium | Model recommendations, quality thresholds |
@@ -300,21 +401,27 @@ class LLMConfig(BaseModel):
 1. Set up project structure (frontend/backend)
 2. Implement auth system
 3. Basic project management
-4. OpenSpec CLI wrapper
+4. Database schema with content tables
 
 ### Phase 2: Proposal Workflow
-1. Scaffold and validation integration
-2. LLM integration with OpenAI/Anthropic
-3. Review commenting system
-4. Status workflow
+1. Proposal CRUD with database content storage
+2. Content versioning system
+3. Review commenting with status workflow
+4. LLM integration with OpenAI/Anthropic
 
-### Phase 3: Production Hardening
-1. WebSocket streaming
-2. Local LLM support (Ollama, vLLM)
-3. Comprehensive audit logging
-4. Performance optimization
+### Phase 3: Validation & Filesystem
+1. "Validate Draft" with temp filesystem
+2. "Mark Ready" filesystem write
+3. OpenSpec CLI integration
+4. WebSocket streaming
+
+### Phase 4: Production Hardening
+1. Local LLM support (Ollama, vLLM)
+2. Comprehensive audit logging
+3. Performance optimization
+4. E2E testing
 
 ### Rollback
 - Database migrations are versioned (Alembic)
 - Feature flags for new capabilities
-- Backup filesystem before destructive operations
+- Content versions allow rollback to any state
