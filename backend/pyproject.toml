@@ -1,0 +1,52 @@
+[project]
+name = "complianceflow"
+version = "0.1.0"
+description = "Compliance management platform wrapping OpenSpec CLI"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "sqlmodel>=0.0.14",
+    "alembic>=1.13.0",
+    "python-jose[cryptography]>=3.3.0",
+    "passlib[bcrypt]>=1.7.4",
+    "bcrypt>=4.0.0,<4.1.0",  # Pin bcrypt for passlib compatibility
+    "email-validator>=2.0.0",  # Required for pydantic EmailStr
+    "python-multipart>=0.0.6",
+    "slowapi>=0.1.9",
+    "httpx>=0.26.0",
+    "tenacity>=8.2.0",
+    "openai>=1.10.0",
+    "anthropic>=0.18.0",
+    "pydantic-settings>=2.1.0",
+    "aiosqlite>=0.19.0",
+    "websockets>=12.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.1.0",
+    "httpx>=0.26.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

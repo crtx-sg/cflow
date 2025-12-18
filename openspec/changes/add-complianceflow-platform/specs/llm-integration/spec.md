@@ -47,6 +47,37 @@ The system SHALL support configurable LLM settings per project or system-wide.
 - **WHEN** LLM is configured
 - **THEN** configuration includes provider, model name, base_url (for local), temperature, max_tokens
 
+### Requirement: Tool-to-LLM Provider Mapping
+
+The system SHALL map OpenSpec tools to their corresponding LLM providers.
+
+#### Scenario: Claude tool mapping
+
+- **WHEN** project is configured with OpenSpec tool "claude"
+- **THEN** the system uses Anthropic as the LLM provider for that project
+- **AND** uses project-specific API key if configured, otherwise falls back to global
+
+#### Scenario: Cursor/Copilot tool mapping
+
+- **WHEN** project is configured with OpenSpec tool "cursor" or "github-copilot"
+- **THEN** the system uses OpenAI as the LLM provider for that project
+
+#### Scenario: Gemini tool mapping
+
+- **WHEN** project is configured with OpenSpec tool "gemini"
+- **THEN** the system uses Google AI as the LLM provider for that project
+
+#### Scenario: Custom tool mapping
+
+- **WHEN** project is configured with an unrecognized tool or "none"
+- **THEN** the system uses the global default LLM provider
+
+#### Scenario: Per-project API key override
+
+- **WHEN** project has a `.env` file with provider-specific API key (e.g., `ANTHROPIC_API_KEY`)
+- **THEN** the system uses that API key for LLM calls within that project
+- **AND** the key takes precedence over global configuration
+
 ### Requirement: Fallback Chain
 
 The system SHALL support fallback to secondary providers on failure.

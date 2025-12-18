@@ -2,7 +2,7 @@
 
 ## Why
 
-Organizations developing safety-critical software (medical devices, automotive, aerospace) must comply with standards like IEC 62304, ISO 26262, and DO-178C. These standards require rigorous documentation, traceability, and audit trails. Currently, teams manually manage compliance artifacts using the OpenSpec CLI, which is error-prone and lacks visibility.
+Organizations developing safety-critical software (medical devices, automotive, aerospace) must comply with standards like IEC 62304, ISO 26262, and DO-178C. These standards require rigorous documentation, traceability, and audit trails. Currently, teams manually manage compliance artifacts, which is error-prone and lacks visibility.
 
 ComplianceFlow provides a GUI and logic wrapper around the OpenSpec CLI tool, enabling teams to draft, validate, iterate, and implement compliance proposals through an intuitive web interface with LLM-assisted content generation.
 
@@ -25,12 +25,19 @@ ComplianceFlow provides a GUI and logic wrapper around the OpenSpec CLI tool, en
 - Validate `openspec.json` schema on project creation
 - Project-level permission assignments
 - No filesystem locking required (database-first approach)
+- **OpenSpec Tool Configuration**: Projects use a pre-configured AI tool from `.env` file in the project directory
+  - `openspec init --tools <configured_tool>` uses the tool specified in project's `.env`
+  - Supported tools: claude, cursor, github-copilot, windsurf, etc. (per OpenSpec CLI)
 
 ### Proposal Lifecycle (Database-First Workflow)
 - **DRAFT state**: Content stored in database only, not filesystem
   - Only Author can edit proposal content
   - All changes tracked with version history in database
   - "Validate Draft" action writes to temp dir for CLI validation
+  - **Proposal Input Textbox**: User can input proposal details in a free-form textbox
+    - On submit, system prepends "Create an OpenSpec change proposal for " to user input
+    - LLM generates/updates proposal content based on the combined prompt
+    - Generated content populates proposal.md, design.md, tasks.md as appropriate
 - **REVIEW state**: Content remains in database
   - Reviewers can view and add comments
   - Author manages comment status: ACCEPTED, REJECTED, DEFERRED
@@ -50,6 +57,9 @@ ComplianceFlow provides a GUI and logic wrapper around the OpenSpec CLI tool, en
 - Secure API key management (encrypted storage, environment variables)
 - Token usage tracking and cost controls
 - Configurable rate limits and fallback strategies
+- **Per-Project LLM Configuration**: Each project uses the LLM backend associated with its configured OpenSpec tool
+  - Tool-to-LLM mapping (e.g., claude → Anthropic, cursor → OpenAI)
+  - Project-level LLM settings override global defaults
 
 ### Validation Engine
 - Execute `openspec validate <proposal_name>` and parse results

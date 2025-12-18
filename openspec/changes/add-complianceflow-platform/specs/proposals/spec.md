@@ -145,6 +145,47 @@ The system SHALL store proposal content in database during DRAFT and REVIEW stat
 - **THEN** the system returns list of file paths with metadata
 - **AND** includes version, size, updated_at for each file
 
+### Requirement: Draft Proposal Input
+
+The system SHALL provide a free-form text input for users to describe proposal requirements in DRAFT state.
+
+#### Scenario: Submit proposal description
+
+- **WHEN** the Author enters text in the proposal input textbox
+- **AND** submits the input via `POST /api/v1/proposals/{id}/generate`
+- **THEN** the system prepends "Create or Update OpenSpec proposal" to the user's input
+- **AND** sends the combined prompt to the project's configured LLM
+- **AND** saves the generated content to appropriate ProposalContent files (proposal.md, design.md, tasks.md)
+- **AND** creates ContentVersion entries for each updated file
+- **AND** logs the generation to audit trail
+
+#### Scenario: Generate with existing content
+
+- **WHEN** the Author submits input
+- **AND** proposal already has content
+- **THEN** the system includes existing content as context in the prompt
+- **AND** the prompt becomes "Create or Update OpenSpec proposal" with user input and existing content
+- **AND** LLM updates or refines the existing content based on new instructions
+
+#### Scenario: Generate empty input
+
+- **WHEN** the Author submits empty or whitespace-only input
+- **THEN** the system returns 400 Bad Request
+- **AND** indicates that input is required
+
+#### Scenario: Generate streaming response
+
+- **WHEN** the Author connects to `/ws/proposals/{id}/generate`
+- **AND** sends input via WebSocket
+- **THEN** the system streams LLM response in real-time
+- **AND** sends completion status when finished
+
+#### Scenario: Generate non-draft status
+
+- **WHEN** a user attempts to generate content for proposal not in DRAFT status
+- **THEN** the system returns 400 Bad Request
+- **AND** indicates content generation only allowed in DRAFT state
+
 ### Requirement: Content Version History
 
 The system SHALL maintain version history for all proposal content.

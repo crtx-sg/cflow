@@ -8,10 +8,11 @@ The system SHALL provide endpoints to create, read, update, and delete projects.
 
 #### Scenario: Create project
 
-- **WHEN** an Author calls `POST /api/v1/projects` with name, local_path, compliance_standard
+- **WHEN** an Author calls `POST /api/v1/projects` with name, local_path, compliance_standard, and optional openspec_tool
 - **THEN** the system creates project record
 - **AND** validates the local_path exists and is accessible
-- **AND** runs `openspec init --standard {standard}` in the directory
+- **AND** reads the `.env` file in local_path for OPENSPEC_TOOL configuration (if not provided in request)
+- **AND** runs `openspec init --tools {openspec_tool}` in the directory
 - **AND** returns the created project with id
 
 #### Scenario: Create project invalid path
@@ -115,3 +116,31 @@ The system SHALL provide project statistics endpoint.
 - **WHEN** a user calls `GET /api/v1/projects/{id}/stats`
 - **THEN** the system returns proposal counts by status
 - **AND** includes recent activity summary
+
+### Requirement: OpenSpec Tool Configuration
+
+The system SHALL support per-project OpenSpec tool configuration.
+
+#### Scenario: Tool configured via project .env
+
+- **WHEN** a project directory contains a `.env` file with `OPENSPEC_TOOL=<tool_name>`
+- **THEN** the system uses that tool for `openspec init --tools <tool_name>`
+- **AND** associates the project with the corresponding LLM backend
+
+#### Scenario: Tool specified in API request
+
+- **WHEN** a project is created with `openspec_tool` parameter in the request body
+- **THEN** the system uses the specified tool instead of reading from `.env`
+- **AND** stores the tool configuration in the project record
+
+#### Scenario: Default tool when not configured
+
+- **WHEN** neither `.env` nor API request specifies a tool
+- **THEN** the system uses `none` as the default tool
+- **AND** uses the global LLM configuration for the project
+
+#### Scenario: Supported tools
+
+- **WHEN** a tool is specified
+- **THEN** the system validates it against supported tools: claude, cursor, github-copilot, windsurf, cline, amazon-q, gemini, opencode, qoder, roocode, or none
+- **AND** returns 400 Bad Request for unsupported tools
